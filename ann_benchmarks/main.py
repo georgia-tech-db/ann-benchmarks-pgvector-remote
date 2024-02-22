@@ -73,7 +73,7 @@ def run_worker(cpu: int, args: argparse.Namespace, queue: multiprocessing.Queue)
             mem_limit = int((psutil.virtual_memory().available - memory_margin) / args.parallelism)
             cpu_limit = str(cpu) if not args.batch else f"0-{multiprocessing.cpu_count() - 1}"
             
-            run_docker(definition, args.dataset, args.count, args.runs, args.timeout, args.batch, cpu_limit, mem_limit)
+            run_docker(definition, args.dataset, args.count, args.runs, args.timeout, args.batch, cpu_limit, args.shm_size, mem_limit)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -84,6 +84,12 @@ def parse_arguments() -> argparse.Namespace:
         help="the dataset to load training points from",
         default="glove-100-angular",
         choices=DATASETS.keys(),
+    )
+    parser.add_argument(
+        "--shm-size",
+        metavar="SIZE",
+        help="the size of /dev/shm in bytes",
+        default="2g",
     )
     parser.add_argument(
         "-k", "--count", default=10, type=positive_int, help="the number of near neighbours to search for"

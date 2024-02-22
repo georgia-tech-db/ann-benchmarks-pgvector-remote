@@ -290,6 +290,7 @@ def run_docker(
     timeout: int,
     batch: bool,
     cpu_limit: str,
+    shm_size: str,
     mem_limit: Optional[int] = None
 ) -> None:
     """Runs `run_from_cmdline` within a Docker container with specified parameters and logs the output.
@@ -329,13 +330,14 @@ def run_docker(
         },
         cpuset_cpus=cpu_limit,
         mem_limit=mem_limit,
+        shm_size=shm_size,
         detach=True,
     )
     logger = logging.getLogger(f"annb.{container.short_id}")
 
     logger.info(
-        "Created container %s: CPU limit %s, mem limit %s, timeout %d, command %s"
-        % (container.short_id, cpu_limit, mem_limit, timeout, cmd)
+        "Created container %s: CPU limit %s, mem limit %s, timeout %d, command %s, shm size %s"
+        % (container.short_id, cpu_limit, mem_limit, timeout, cmd, shm_size)
     )
 
     def stream_logs():
