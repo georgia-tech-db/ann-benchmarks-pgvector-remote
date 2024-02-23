@@ -1,5 +1,8 @@
 import subprocess
 import sys
+import numpy as np
+
+from numpy.core.multiarray import array as array
 import pgvector.psycopg
 import psycopg
 # from pyscopg.errors import _info_to_dict
@@ -14,6 +17,7 @@ class PGVector_Remote(BaseANN):
         self._m = method_param['M']
         self._ef_construction = method_param['efConstruction']
         self._cur = None
+        self.global_count = 0
 
         if metric == "angular":
             self._query = "SELECT id FROM items ORDER BY embedding <=> %s LIMIT %s"
@@ -38,8 +42,7 @@ class PGVector_Remote(BaseANN):
         cur = conn.cursor()
         # cur.execute("SET client_min_messages = debug1")
 
-        # cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
-        cur.execute("CREATE TABLE items (embedding vector(%d), id int)" % X.shape[1])  # TODO: id is in the first column
+        cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
         cur.execute("ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN")
         print("copying data...")
         with cur.copy("COPY items (id, embedding) FROM STDIN") as copy:
@@ -76,8 +79,33 @@ class PGVector_Remote(BaseANN):
         # self._cur.execute("SET hnsw.ef_search = %d" % ef_search)
 
     def query(self, v, n):
+        self.global_count += 1
+        print(f"global_count: {self.global_count}")
         self._cur.execute(self._query, (v, n), binary=True, prepare=True)
-        return [id for id, in self._cur.fetchall()]
+        neighbors =  [id for id, in self._cur.fetchall()]
+        print(f"neighbors: {neighbors}")
+        return neighbors
+
+    def batch_query(self, X: np.array, n: int) -> None:
+        print("batch_query")
+        import asyncpg
+        import asyncio
+        import json
+        async def async_query(pool, vec, topK):
+            async with pool.acquire() as conn:
+                print("vec: ", vec)
+                vec_str = json.dumps(vec.tolist())
+                print("vec_str: ", vec_str)
+                print(await conn.fetch("SELECT * FROM test ORDER BY vec <-> %s LIMIT %s", vec_str, topK))
+
+        async def run_async_queries(vecs, topK):
+            pool = await asyncpg.create_pool(user='postgres', password='postgres', database='ann', min_size=2, max_size=20)
+            await asyncio.gather(*[async_query(pool, vec, topK) for vec in vecs])
+            await pool.close()
+
+        # run the async queries
+        return asyncio.run(run_async_queries(vecs=X, topK=n))
+
 
     def get_memory_usage(self):
         if self._cur is None:

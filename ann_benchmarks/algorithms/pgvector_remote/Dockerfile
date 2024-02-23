@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
 # set remote origin
 RUN git clone -b ann_benchmarks_dev https://github.com/georgia-tech-db/pgvector-remote.git /tmp/pgvector-remote
-RUN pip install psycopg[binary] pgvector
+RUN pip install psycopg[binary] pgvector asyncpg
 
 RUN echo a012345678
 # fetch (cd into the directory and then fetch)

@@ -10,4 +10,4 @@ float:
       M-16:
         arg_groups: [{M: 16, efConstruction: 200}]
         args: {}
-        query_args: [[10, 20]]
+        query_args: [[10]]
