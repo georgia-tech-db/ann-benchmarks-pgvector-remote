@@ -3,15 +3,11 @@ float:
   - base_args: ['@metric']
     constructor: PGVector_Remote
     disabled: false
-    docker_tag: ann-benchmarks-pgvector
-    module: ann_benchmarks.algorithms.pgvector
+    docker_tag: ann-benchmarks-pgvector_remote
+    module: ann_benchmarks.algorithms.pgvector_remote
     name: pgvector_remote
     run_groups:
       M-16:
         arg_groups: [{M: 16, efConstruction: 200}]
         args: {}
-        query_args: [[10, 20, 40, 80, 120, 200, 400, 800]]
-      M-24:
-        arg_groups: [{M: 24, efConstruction: 200}]
-        args: {}
-        query_args: [[10, 20, 40, 80, 120, 200, 400, 800]]
+        query_args: [[10, 20]]
