@@ -18,8 +18,13 @@ from dotenv import load_dotenv
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
+if PINECONE_API_KEY is None:
+    print("PINECONE_API_KEY not found in .env file")
+else:
+    print("PINECONE_API_KEY loaded successfully. it is %s" % PINECONE_API_KEY)
 
 
+socket_dir = "/home/ubuntu/pg_sockets"
 
 class PGVector_Remote(BaseANN):
     def __init__(self, metric, arg_group):
@@ -42,45 +47,65 @@ class PGVector_Remote(BaseANN):
         # pprint(notice.__reduce__())
 
     def fit(self, X):
+
+        # return  # CUT
+
         # subprocess.run("service postgresql start", shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr) # TODO: we'd rather do this in the Dockerfile
-        conn = psycopg.connect(user="ann", password="ann", dbname="ann", autocommit=True)
+        conn = psycopg.connect(user="ann", password="ann", dbname="ann", autocommit=True, host=socket_dir)
         pgvector.psycopg.register_vector(conn)
         # send client messages to stdout
         conn.add_notice_handler(self.notice_handler)
-
-
         cur = conn.cursor()
-        # cur.execute("SET client_min_messages = debug1")
+        cur.execute("SET client_min_messages = 'NOTICE'")
+        cur.execute("SET pinecone.top_k = 100")
+        self._cur = cur
 
         # drop
-        cur.execute("DROP TABLE IF EXISTS items")
-        cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
-        cur.execute("ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN")
-        print("copying data...")
-        with cur.copy("COPY items (id, embedding) FROM STDIN") as copy:
-            for i, embedding in enumerate(X):
-                copy.write_row((i, embedding))
+        if False:
+            cur.execute("DROP TABLE IF EXISTS items")
+            cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
+            cur.execute("ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN")
+            print("copying data...")
+            start = time.time()
+            with cur.copy("COPY items (id, embedding) FROM STDIN") as copy:
+                for i, embedding in enumerate(X):
+                    # check if the embedding is all zeros and if so skip and warn
+                    if np.all(embedding == 0):
+                        print(f"embedding {i} is all zeros!!!")
+                        continue
+                    if not i % 1000:
+                        print(i)
+                        print(time.time() - start, "seconds")
+                    if i > 20000:
+                        pass # no effect
+                    copy.write_row((i, embedding))
+            print("done copying data")
+            return
+            
+        return
         print("creating index...")
-        if self._metric == "angular":
-            # cur.execute(
-                # "CREATE INDEX ON items USING pinecone (embedding vector_cosine_ops) WITH (spec = '{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}})" % (self._m, self._ef_construction)
-            # )
-            pass
-        elif self._metric == "euclidean":
-            print('hello Euclid')
-            cur.execute("ALTER SYSTEM SET pinecone.api_key = '%s'" % PINECONE_API_KEY)
-            cur.execute("SHOW pinecone.api_key")
-            print(cur.fetchone())
-            # set client debug level to debug1
-            cur.execute("SET client_min_messages = debug1")
-            cur.execute("CREATE INDEX pcindex ON items USING pinecone (embedding) WITH (spec = '{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}')")
-        else:
-            raise RuntimeError(f"unknown metric {self._metric}")
+        cur.execute("ALTER SYSTEM SET pinecone.api_key = '%s'" % PINECONE_API_KEY)
+        cur.execute("SHOW pinecone.api_key")
+        print(cur.fetchone())
+        # print the backend
+        cur.execute("SELECT pg_backend_pid();")
+        print(cur.fetchone())
+        # input('continue...') # can't read stdin!!
+        # set client debug level to debug1
+        cur.execute("SET client_min_messages = debug1")
+        cur.execute("SET pinecone.vectors_per_request = 100")
+        cur.execute("SET pinecone.requests_per_batch = 20")
+        # TODO: metric==euclidean ? vector_l2_ops : vector_angular_ops
+        vector_op_class = {"angular": "vector_cosine_ops", "euclidean": "vector_l2_ops", "inner": "vector_ip_ops"}[self._metric]
+        host = "gist-23kshha.svc.us-east-1-aws.pinecone.io"
+        cur.execute(f"CREATE INDEX pcindex ON items USING pinecone (embedding {vector_op_class}) WITH (host='{host}', overwrite=true)")
         # sleep 15s to allow the index to build
         print("sleeping for 15s")
         time.sleep(15)
         print("done!")
+        # exit()
         self._cur = cur
+
 
     def set_query_arguments(self, *args):
         pass
@@ -102,6 +127,9 @@ class PGVector_Remote(BaseANN):
 
         async def init(conn):
             await pgvector.asyncpg.register_vector(conn)
+            # set pinecone.api_key = 100
+            await conn.execute("SET pinecone.api_key = '%s'" % PINECONE_API_KEY)
+            await conn.execute("SET pinecone.top_k = 100")
 
         async def async_query(pool, vec, topK):
             async with pool.acquire() as conn:
@@ -112,7 +140,7 @@ class PGVector_Remote(BaseANN):
                 return {'neighbor_list': [n['id'] for n in neighbors], 'latency': latency}
 
         async def run_async_queries(vecs, topK):
-            pool = await asyncpg.create_pool(user='ann', password='ann', database='ann', min_size=2, max_size=60, init=init)
+            pool = await asyncpg.create_pool(user='ann', password='ann', database='ann', min_size=2, max_size=4, init=init, host=socket_dir)
             results = await asyncio.gather(*[async_query(pool, vec, topK) for vec in vecs])
             await pool.close()
             return results
@@ -123,8 +151,8 @@ class PGVector_Remote(BaseANN):
         self.batch_latencies = [r['latency'] for r in result]
         return result
 
-    def get_batch_latencies(self):
-        return self.batch_latencies
+    # def get_batch_latencies(self):
+        # return self.batch_latencies
 
 
     def get_memory_usage(self):
