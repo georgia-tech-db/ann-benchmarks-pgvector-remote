@@ -1,21 +1,31 @@
 import subprocess
 import sys
 import numpy as np
+import time
 
 from numpy.core.multiarray import array as array
 import pgvector.psycopg
+import pgvector.asyncpg
 import psycopg
 # from pyscopg.errors import _info_to_dict
 from pprint import pprint
 
 from ..base.module import BaseANN
 
+# get pinecone api key from caller's dotenv .env file
+import os
+from dotenv import load_dotenv
+load_dotenv()
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+
+
 
 class PGVector_Remote(BaseANN):
-    def __init__(self, metric, method_param):
+    def __init__(self, metric, arg_group):
         self._metric = metric
-        self._m = method_param['M']
-        self._ef_construction = method_param['efConstruction']
+        # self._m = arg_group['M']
+        # self._ef_construction = arg_group['efConstruction']
         self._cur = None
         self.global_count = 0
 
@@ -29,11 +39,11 @@ class PGVector_Remote(BaseANN):
     def notice_handler(self, notice):
         print("Received notice:", notice.message_primary)
         # user pprint to print the notice as a dictionary
-        pprint(notice.__reduce__())
+        # pprint(notice.__reduce__())
 
     def fit(self, X):
-        subprocess.run("service postgresql start", shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr)
-        conn = psycopg.connect(user="postgres", password="postgres", dbname="ann", autocommit=True)
+        # subprocess.run("service postgresql start", shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr) # TODO: we'd rather do this in the Dockerfile
+        conn = psycopg.connect(user="ann", password="ann", dbname="ann", autocommit=True)
         pgvector.psycopg.register_vector(conn)
         # send client messages to stdout
         conn.add_notice_handler(self.notice_handler)
@@ -42,17 +52,14 @@ class PGVector_Remote(BaseANN):
         cur = conn.cursor()
         # cur.execute("SET client_min_messages = debug1")
 
+        # drop
+        cur.execute("DROP TABLE IF EXISTS items")
         cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
         cur.execute("ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN")
         print("copying data...")
         with cur.copy("COPY items (id, embedding) FROM STDIN") as copy:
             for i, embedding in enumerate(X):
                 copy.write_row((i, embedding))
-        # print a couple random rows
-        cur.execute("SELECT * FROM items ORDER BY random() LIMIT 5")
-        print("sample rows:")
-        for row in cur.fetchall():
-            print(row)
         print("creating index...")
         if self._metric == "angular":
             # cur.execute(
@@ -61,21 +68,23 @@ class PGVector_Remote(BaseANN):
             pass
         elif self._metric == "euclidean":
             print('hello Euclid')
-            cur.execute("SET ivfflat.probes = 17")
-            cur.execute("SET pinecone.api_key = '5b2c1031-ba58-4acc-a634-9f943d68822c'")
-            cur.execute("SHOW ivfflat.probes")
-            print(cur.fetchone())
+            cur.execute("ALTER SYSTEM SET pinecone.api_key = '%s'" % PINECONE_API_KEY)
             cur.execute("SHOW pinecone.api_key")
             print(cur.fetchone())
             # set client debug level to debug1
-            cur.execute("CREATE INDEX pc_index ON items USING pinecone (embedding) WITH (spec = '{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}')")
+            cur.execute("SET client_min_messages = debug1")
+            cur.execute("CREATE INDEX pcindex ON items USING pinecone (embedding) WITH (spec = '{\"serverless\":{\"cloud\":\"aws\",\"region\":\"us-west-2\"}}')")
         else:
             raise RuntimeError(f"unknown metric {self._metric}")
+        # sleep 15s to allow the index to build
+        print("sleeping for 15s")
+        time.sleep(15)
         print("done!")
         self._cur = cur
 
-    def set_query_arguments(self, ef_search):
-        self._ef_search = ef_search
+    def set_query_arguments(self, *args):
+        pass
+        # self._ef_search = ef_search
         # self._cur.execute("SET hnsw.ef_search = %d" % ef_search)
 
     def query(self, v, n):
@@ -90,29 +99,39 @@ class PGVector_Remote(BaseANN):
         print("batch_query")
         import asyncpg
         import asyncio
-        import json
+
+        async def init(conn):
+            await pgvector.asyncpg.register_vector(conn)
+
         async def async_query(pool, vec, topK):
             async with pool.acquire() as conn:
-                print("vec: ", vec)
-                vec_str = json.dumps(vec.tolist())
-                print("vec_str: ", vec_str)
-                print(await conn.fetch("SELECT * FROM test ORDER BY vec <-> %s LIMIT %s", vec_str, topK))
+                start = time.time()
+                neighbors = await conn.fetch("SELECT id,embedding<-> $1 FROM items ORDER BY embedding <-> $1 LIMIT $2", vec, topK)
+                latency = time.time() - start
+                # print(latency)
+                return {'neighbor_list': [n['id'] for n in neighbors], 'latency': latency}
 
         async def run_async_queries(vecs, topK):
-            pool = await asyncpg.create_pool(user='postgres', password='postgres', database='ann', min_size=2, max_size=20)
-            await asyncio.gather(*[async_query(pool, vec, topK) for vec in vecs])
+            pool = await asyncpg.create_pool(user='ann', password='ann', database='ann', min_size=2, max_size=60, init=init)
+            results = await asyncio.gather(*[async_query(pool, vec, topK) for vec in vecs])
             await pool.close()
+            return results
 
         # run the async queries
-        return asyncio.run(run_async_queries(vecs=X, topK=n))
+        result = asyncio.run(run_async_queries(vecs=X, topK=n))
+        self.res = [r['neighbor_list'] for r in result]
+        self.batch_latencies = [r['latency'] for r in result]
+        return result
+
+    def get_batch_latencies(self):
+        return self.batch_latencies
 
 
     def get_memory_usage(self):
         if self._cur is None:
             return 0
-        # self._cur.execute("SELECT pg_relation_size('items_embedding_idx')")
-        # return self._cur.fetchone()[0] / 1024
-        return 1
+        self._cur.execute("SELECT pg_relation_size('pcindex')")
+        return self._cur.fetchone()[0] / 1024
 
     def __str__(self):
-        return f"PGVector_Remote(m={self._m}, ef_construction={self._ef_construction}, ef_search={self._ef_search})"
+        return f"PGVector_Remote()"

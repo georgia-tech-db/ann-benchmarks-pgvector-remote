@@ -7,7 +7,7 @@ float:
     module: ann_benchmarks.algorithms.pgvector_remote
     name: pgvector_remote
     run_groups:
-      M-16:
-        arg_groups: [{M: 16, efConstruction: 200}]
+      rungroup-1:
+        arg_groups: [{}]
         args: {}
-        query_args: [[10]]
+        query_args: [[]]
